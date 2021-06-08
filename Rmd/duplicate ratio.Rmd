@@ -1,0 +1,123 @@
+---
+title: "ada master pipeline"
+author: "Alec Plotkin"
+date: '`r format(Sys.Date(), "%d %b %Y")`'
+output: html_document
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# this should cover my bases so that the working directory is correct when i run this markdown direct to console (as i usually do) or if i knit the entire thing
+```
+
+now that we have all the absorbance deltas, do some QC:
+
+calculate ratios between duplicate wells in order to identify samples where there wasn't enough for two full wells, or if there were any pipetting errors. if there were, then we'd expect one well to have a much higher value than the other. we'll take the ratio of the two wells (as well as its reciprocal) and identify any outliers above a certain threshold. we'll then cross-check these outliers with a list of samples that ran out in order to verify.
+
+```{r ratios}
+# calculate ratios
+odds <- seq(nrow(deltas)/2)*2 - 1
+evens <- seq(nrow(deltas)/2)*2
+if (!identical(deltas$sample_id[evens], deltas$sample_id[odds]))
+  stop("all sample_id must match in order to calculate duplicates")
+ratios <- tibble(
+                  well1 = deltas$well[odds],
+                  well2 = deltas$well[evens],
+                  sample_id = deltas$sample_id[odds],
+                  r1 = deltas$dabs[odds] / deltas$dabs[evens],
+                  r2 = deltas$dabs[evens] / deltas$dabs[odds],
+                  plate = deltas$plate[odds]
+                 )
+```
+
+now we can plot a density curve of the duplicate ratios:
+
+```{r density_curve}
+ratio1_density <- ggplot(ratios, aes(x = r1)) +
+  geom_density()
+ratio2_density <- ggplot(ratios, aes(x = r2)) +
+  geom_density()
+
+ratio1_density
+ratio2_density
+```
+
+pretty easy to identify outliers here, now let's see what it looks like if we remove the right skew from each curve:
+
+```{r density_curve_adj}
+r2lim <- 2*median(ratios$r2, na.rm = TRUE) # + 3*IQR(ratios$r2, na.rm = TRUE)
+ratio2_density_adj <- ratio2_density +
+  xlim(0, r2lim)
+
+r1lim <- 2*median(ratios$r1, na.rm = TRUE) # + 3*IQR(ratios$r1, na.rm = TRUE)
+ratio1_density_adj <- ratio1_density +
+  xlim(0, r1lim)
+
+ratio1_density_adj
+ratio2_density_adj
+```
+
+need to remove them from the data set as well:
+
+```{r duplicate_outliers}
+# locate upper outliers in r1 and r2 from ratios
+out_r1 <- ratios %>%
+  filter(r1 > r1lim) %>%
+  select(sample_id, well2, r1, plate)
+out_r2 <- ratios %>%
+  filter(r2 > r2lim) %>%
+  select(sample_id, well1, r2, plate)
+
+# create list of unique identifiers to be used in selecting outlier wells
+out_r1_id <- out_r1 %>%
+  select(sample_id, well2, plate) %>%
+  pmap_chr(paste, sep = "; ")
+out_r2_id <- out_r2 %>%
+  select(sample_id, well1, plate) %>%
+  pmap_chr(paste, sep = "; ")
+deltas_id <- deltas %>%
+  select(sample_id, well, plate) %>%
+  pmap_chr(paste, sep = "; ")
+
+# outliers should be flagged with their type, and saved into a new dataframe while preserving their values in deltas
+deltas[deltas_id %in% out_r1_id, "flag"] <- "rep2 << rep1"
+deltas[deltas_id %in% out_r2_id, "flag"] <- "rep1 << rep2"
+qcdeltas <- mutate(deltas, 
+                   dabs = if_else(is.na(flag), dabs, NA_real_),
+                   labs = log(dabs)
+                   )
+
+filter(qcdeltas, rle(dabs)$lengths > 1L)  # no adjacent wells from the same sample should show up
+```
+
+double check the distribitution of ratios after removing values
+
+```{r post_qc}
+qcratios <- tibble(
+                  well1 = qcdeltas$well[odds],
+                  well2 = qcdeltas$well[evens],
+                  sample_id = qcdeltas$sample_id[odds],
+                  r1 = qcdeltas$dabs[odds] / qcdeltas$dabs[evens],
+                  r2 = qcdeltas$dabs[evens] / qcdeltas$dabs[odds],
+                  plate = qcdeltas$plate[odds]
+                 )
+qcratio1_density <- ggplot(qcratios, aes(x = r1)) +
+  geom_density() +
+  coord_trans(x = "log")
+qcratio2_density <- ggplot(qcratios, aes(x = r2)) +
+  geom_density() +
+  coord_trans(x = "log")
+
+qcratio1_density
+qcratio2_density
+```
+
+display session info
+
+```{r session_info}
+sessionInfo()
+```

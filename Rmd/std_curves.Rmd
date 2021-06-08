@@ -1,0 +1,120 @@
+---
+title: "std_curve"
+author: "Alec Plotkin"
+date: "December 22, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r formatting}
+# format date to add to figure names
+today <- format(Sys.Date(), "%d_%b_%Y")
+
+# ask whether to print files
+print_plots <- readline("print plots to files? y / n    ")
+if (print_plots == "y") {
+  print_plots <- TRUE
+} else {
+  print_plots <- FALSE
+}
+```
+
+exctract standards and check out distribution across all plates:
+
+```{r stds}
+stands <- qcdeltas_lod %>%
+  filter(grepl("Std", sample_id), !grepl("EHNA", sample_id))
+
+overlay <- ggplot(stands, aes(x = plate)) +
+  geom_jitter(aes(y = labs, color = sample_id)) +
+  geom_point(aes(y = lod_labs))
+  
+overlay
+```
+
+we want each plate to have a roughly equivalent "step" between the standards on a log scale, which appears to be the case, with a few exceptions. any major inconsistencies should have been brushed up in QC. however, there does appear to be some plate-to-plate variation in the limits of detection as well as the overall ranges of the standards, so it would be best to perform these calculations on a plate-to-plate basis.
+
+
+## standard curves:
+
+for each plate, construct a linear model based on the log-transformed standards. the models and summaries will be saved to separate lists, and the model coefficients will be obtained from the summaries. log-transformed values are used because the standards were prepared by serial dilution, so the concentrations are spaced on a log-base-2 scale. 
+
+```{r std_models}
+# make a list of expected concentrations to merge with standard absorbances
+ecs <- dplyr::tibble(
+                     sample_id = unique(stands$sample_id), 
+                     ec = 47.1 * 0.5^seq(7),
+                     log_ec = log(47.1) + seq(7)*log(0.5)
+                     )
+stands <- merge(stands, ecs, by = "sample_id")
+
+# function to create linear models from nested dataframes
+std_curve <- function(df) {
+  if (!is.data.frame(df)) 
+    stop("object to be fitted must be a data frame")
+  lm(labs ~ log_ec, data = df)
+}
+
+std_mdls <- stands %>%
+  nest(data = which(!names(stands) %in% "plate")) %>%
+  mutate(model = map(data, std_curve)) %>%
+  mutate(
+         residuals = map2(data, model, modelr::add_residuals),
+         coefs = map(model, broom::tidy),
+         glance = map(model, broom::glance),
+         rsqr = map_dbl(glance, "r.squared")
+         )
+
+mdl_coefs <- std_mdls %>%
+  unnest(coefs) %>%
+  select(plate, term, estimate) %>%
+  pivot_wider(names_from = term, values_from = estimate) %>%
+  rename(int = `(Intercept)`, slope = log_ec)
+```
+
+models have been made, and coefficients have been stored in their own data.frame. before using them to calculate concentrations though, we should check how well the standard curves perform. we'll do this by looking at residuals, as well as how the prediction curves compare to the standard data:
+
+```{r curve_qc}
+resid_plot <- unnest(std_mdls, residuals) %>%
+  ggplot(aes(x = log_ec, y = resid, color = plate)) +
+    geom_jitter() +
+    facet_wrap(~ plate)
+
+curve_plot <- unnest(std_mdls, data) %>%
+  ggplot(aes(x = log_ec, y = labs, color = plate)) +
+    geom_point() +
+    geom_abline(data = mdl_coefs, aes(slope = slope, intercept = int)) +
+    facet_wrap(~ plate)
+
+# print to files
+if (print_plots) {
+  curve_plot + ggsave('standard_curves.png')
+  resid_plot + ggsave("standard_curves_resid.png")
+}
+
+resid_plot
+curve_plot
+```
+
+curves seem to fit the standards well for most of the range, however, they do not work as well at low concentrations. many of the lowest standard are below the limit of detection, and so have been kicked out of the standard curve.
+
+finally, merge the model coefficients back into qcdeltas_lod to make an analytic data frame that can be used to calculate activity... and then calculate the enzyme activity!
+
+```{r merge_coefs}
+anadf <- merge(qcdeltas_lod, mdl_coefs, by = "plate") %>%
+  mutate(
+         lod_act = exp( (lod_labs - int) / slope),
+         act = exp( (labs - int) / slope)
+         )
+# note that values below the lod are imputed as half of the *calculated activity* of raw LOD. this value is different than if the imputation was *half of the lod absorbance*, entered into the standard curve
+```
+
+```{r end}
+# clear print_plots
+rm(print_plots)
+
+sessionInfo()
+```

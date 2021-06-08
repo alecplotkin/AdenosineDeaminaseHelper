@@ -1,0 +1,102 @@
+---
+title: "tidyup"
+author: "Alec Plotkin"
+date: "January 9, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r dialog}
+# ask user if r should write data to file
+# ask whether to print files
+print_out <- readline("print data to file? y / n    ")
+if (print_out == "y") {
+  print_out <- TRUE
+} else {
+  print_out <- FALSE
+}
+```
+
+put data set into a form that can be uploaded to AWS
+*consider leaving this part out in future versions: can be done in post-processing*
+
+```{r tidyup}
+# extract kit QCs, URS, BURP, P3 refs:
+tidysamples <- filter(samples, !grepl("^QC|^URS", sample_id))
+
+# extract components of sample id:
+tidysamples <- tidysamples %>%
+  mutate(
+         isoform = ifelse(grepl("EHNA", sample_id), "ADA2", "total_ADA"),
+         sample_id = sub(' EHNA', '', sample_id)
+         ) %>%
+  rename(activity = act, lod = lod_act)
+
+# double check values of identifiers are as expected
+unique(tidysamples$isoform)
+```
+
+impute ADA1 from Total ADA and ADA2:
+
+```{r imputation}
+tidysamples <- tidysamples %>%
+  pivot_wider(names_from = isoform, values_from = c(activity, flag)) %>%
+  mutate(activity_ADA1 = activity_total_ADA - activity_ADA2)
+```
+
+clean up finaldf: report one LOD (the max of all), and use it for all samples
+
+```{r max_lod}
+lod_max <- max(tidysamples$lod)
+tidysamples <- tidysamples %>%
+  mutate(
+        flag_total_ADA = ifelse(activity_total_ADA < lod_max, "< LOD", NA_character_),
+        flag_ADA2 = ifelse(activity_ADA2 < lod_max, "< LOD", NA_character_),
+        flag_ADA1 = ifelse(activity_ADA1 < lod_max, "< LOD", NA_character_)
+        ) %>%
+  mutate(
+        activity_total_ADA = ifelse(
+          activity_ADA1 < 0, 
+          (activity_total_ADA + activity_ADA2) / 2,
+          activity_total_ADA
+          ),
+        activity_ADA2 = ifelse(
+          activity_ADA1 < 0,
+          activity_total_ADA,
+          activity_ADA2
+          ),
+        flag_ADA1 = ifelse(
+          activity_ADA1 < 0,
+          "ADA2 > total_ADA",
+          flag_ADA1
+          ),
+        activity_ADA1 = ifelse(
+          activity_ADA1 < 0,
+          NA_real_,
+          activity_ADA1
+          )
+  ) %>%
+  select(-c("lod"))
+
+filter(tidysamples, flag_total_ADA == "< LOD")
+filter(tidysamples, flag_ADA2 == "< LOD")
+filter(tidysamples, flag_ADA1 == "< LOD")
+```
+
+save as .csv:
+
+```{r save}
+write_csv(tidysamples, here(dest, paste0(dest, "_ADA_", today, ".csv")))
+write_rds(tidysamples, here(dest, paste0(dest, '_ADA_', today, '.rds')))
+```
+
+
+```{r end}
+# clear print_plots
+rm(print_data)
+
+sessionInfo()
+```

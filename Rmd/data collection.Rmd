@@ -1,0 +1,134 @@
+---
+title: "ada master pipeline"
+author: "Alec Plotkin"
+date: '`r format(Sys.Date(), "%d %b %Y")`'
+output: html_document
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# this should cover my bases so that the working directory is correct when i run this markdown direct to console (as i usually do) or if i knit the entire thing
+```
+
+## libraries
+
+- "readxl" is used for its `read_excel()` function, when extracting raw data
+- "tidyverse" is used for dplyr's data wrangling functions, ggplot2's graphing functions, stringr's string manipulation functions, forcat's factor manipulation functions
+- "knitr" is used for rmarkdown reports
+
+```{r libs, warning = FALSE, message = FALSE}
+# check if packages are installed and load libraries
+if (!require(readxl)) install.packages('readxl')
+library(readxl)
+if (!require(knitr)) install.packages('knitr')
+library(knitr)
+if (!require(tidyverse)) install.packages('tidyverse')
+library(tidyverse)
+if (!require(here)) install.packages('here')
+library(here)
+```
+
+## source functions
+load functions to help processing
+
+```{r functions}
+source(here("ADA/R", "functions.R"))
+source(here("ADA/R", "read_raw.R"))
+```
+
+
+## read in
+extract plate maps and raw data from excel files.
+
+```{r plate_maps, message = FALSE}
+# identify directory with all files
+dest <- 'ADA'
+
+# read all plate maps in directory
+map_files <- list.files(here(dest, "maps/plates"))
+map_files <- map_files[!grepl("^~\\$", map_files)]  # delete temp files
+
+
+# read in plate maps
+maps <- purrr::map(here(dest, "maps/plates", map_files), 
+                   read_excel_all_sheets, 
+                   na.strings = c("", "NA", "---")) %>%
+  flatten() %>%
+  purrr::map(reformap)
+```
+
+
+## pipeline
+
+the program lists datafiles in the `"raw"` folder, and uses their names to generate a list of `plate_names`.
+
+```{r raw_files}
+raw_files <- list.files(here(dest, "data/raw"))
+raw_files <- raw_files[!grepl("^~\\$", raw_files)]  # delete temp files
+
+# generate plate names by removing file extensions from data_files, clean up names, then order
+raw_names <- sub(pattern = "(.*)\\..*$", replacement = "\\1", basename(raw_files))
+
+if (length(maps) != length(raw_files))
+  stop('The number of plates and plate maps is not equal')
+
+# string to extract plate identifier
+plate_id <- 'plate_\\d\\d'
+raw_clean = stringr::str_extract(raw_names, plate_id)
+maps_clean = stringr::str_extract(names(maps), plate_id)
+
+# this needs to be turned into a tryCatch() statement...
+if (!identical(raw_names, names(maps))) {
+  warning('The names of raw files and plate maps do not match.\n\tRaw files:\n')
+  show(raw_names)
+  warning('\tPlate maps:\n')
+  show(names(maps))
+  if (identical(raw_clean, maps_clean)) {
+    message('\nThe following names will be applied:')
+    show(raw_clean)
+  } else {
+    stop('Matching names could not be found')
+  }
+}
+```
+
+extract absorbance change over time (delta) for all samples by sourcing the read_raw.R script in conjunction with sample names in plate maps
+
+```{r read_excel, message = FALSE}
+deltas <- purrr::pmap_dfr(
+  list(platename = raw_names, platemap = maps),
+  read_raw, 
+  path = here(dest, "data/raw")
+  )
+```
+
+read_raw.R saves each plate into its own R-readable datafile. we can read and combine these datafiles to get a tibble of all the samples' deltas
+
+flag negative delta absorbances and set to NA:
+
+```{r negatives}
+# remove blanks from deltas, since they'll have separate qc:
+blanks <- filter(deltas, grepl("Blk", sample_id))
+deltas <- filter(deltas, !grepl("Blk", sample_id))
+
+# create a column for flags w/in deltas
+deltas$flag <- NA_character_
+
+# check for negative values in averages
+neg_abs <- deltas[which(deltas$dabs < 0), ]
+cat("samples where average absorbance delta is below 0: ", nrow(neg_abs), "\\n")
+neg_abs
+
+deltas$flag[which(deltas$dabs < 0)] <- "dabs < 0"
+deltas$dabs[which(deltas$dabs < 0)] <- NA_real_
+message("averages below 0 set to NA")
+```
+now deltas can be used to prepare standard curves, following some QC.
+
+```{r session_info}
+sessionInfo()
+```

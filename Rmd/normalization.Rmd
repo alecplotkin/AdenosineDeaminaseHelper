@@ -1,0 +1,109 @@
+---
+title: "normalization"
+author: "Alec Plotkin"
+date: "1/8/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r formatting}
+# format date to add to figure names
+today <- format(Sys.Date(), "%d_%b_%Y")
+
+# ask whether to print files
+print_plots <- readline("print plots to files? y / n    ")
+if (print_plots == "y") {
+  print_plots <- TRUE
+} else {
+  print_plots <- FALSE
+}
+```
+
+## investigate plate-to-plate variability
+
+exclude samples as noted in lab notebook:
+
+```{r exclude}
+exclude <- read_csv(here(dest, 'maps/exclude/30july2020_CO2_expt_exclude.csv'))$`Exclude:`
+anadf %>% filter(well %in% exclude)
+anadf <- anadf %>% filter(!well %in% exclude)
+```
+
+look at change in sample activity across all plates. samples here include everything except standard curves and blanks (since they have already been used).
+
+```{r all_samples}
+samples <- anadf %>%
+  filter(!grepl("Std|Blk", sample_id)) %>%
+  group_by(plate, sample_id) %>%
+  summarize(act = mean(act, na.rm = TRUE),
+            lod_act = mean(lod_act)) %>%
+  mutate(flag = ifelse(act < lod_act, "< LOD", NA_character_))
+            
+samples_plate_avg <- samples %>% 
+  group_by(plate) %>%
+  summarize(act = mean(act, na.rm = TRUE))
+
+sample_drift <- ggplot(samples, aes(x = plate, y = act, color = plate)) +
+  geom_jitter() +
+  geom_boxplot()
+
+# print to file
+# if (print_plots) {
+#   file_name <- paste0("sample_drift_pre_norm_", today)
+#   png(here(paste0("fig/", file_name, ".png")))
+#   print(sample_drift)
+#   dev.off()
+# }
+
+sample_drift
+```
+
+drift is not too bad, but plate normalization will still be necessary. 
+
+## normalization:
+
+strategy:
+
+normalize the entire data set by dividing each plate's reading by average of all readings for each reference standard, thus creating an adjustment factor. average all three adjustment factors to get an overall normalization term for each plate. 
+
+look at kit QCs and reference samples (should have consistent values)
+
+```{r kit_qcs}
+qc1 <- filter(samples, grepl("QC1$", sample_id)) %>%
+            mutate(ref_std = "qc1")
+mean(qc1$norm1)
+
+# analysis isn't really possible for QC2, since the concentration is so much higher than what is machine readable. some plates have diluted versions, but we won't deal with that here
+
+urs <- filter(samples, grepl("URS$", sample_id)) %>% 
+            mutate(ref_std = "urs")
+mean(urs$norm1)
+
+# make a plot of reference values per plate to look for variation over time
+ref_drift <- ggplot(mapping = aes(x = plate, y = act)) +
+  geom_point(data = qc1, aes(color = 1)) +
+  geom_point(data = urs, aes(color = 2)) +
+  coord_trans(y = "log") +
+  theme(axis.text.x = element_text(angle = 60))
+
+# print to file
+# if (print_plots) {
+#   file_name <- paste0("ref_drift_pre_norm_", today)
+#   png(here(paste0("fig/", file_name, ".png")))
+#   print(ref_drift)
+#   dev.off()
+# }
+
+ref_drift
+```
+
+
+```{r end}
+# clear print_plots
+rm(print_plots)
+
+sessionInfo()
+```

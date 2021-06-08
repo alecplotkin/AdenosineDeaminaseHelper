@@ -1,0 +1,85 @@
+---
+title: "limits of detection"
+author: "Alec Plotkin"
+date: "1/8/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+calculate limit of detection for each plate using blank wells and the lowest standard(s), with the following equations:
+
+```
+# limit of blank:
+lob = mean(blks) + 1.645*sd(blks)
+
+# limit of detection:
+lod = lob + 1.645*sd(lcs)
+```
+
+where lob = limit of blank, lod = limit of detection, and lcs = low concentration sample
+
+blanks have already been extracted from data set of absorbance deltas; inspect them:
+
+```{r blanks}
+# look at overview of blanks
+head(blanks, n = 20L)
+
+# are there any negatives?
+filter(blanks, dabs < 0)
+
+# keep negatives (there are too many to exclude), but use them to calculate limit of blank:
+lob <- blanks %>% 
+  group_by(plate) %>% 
+  summarize(lob = mean(dabs) + 1.645*sd(dabs))
+
+lob  # no negatives here
+```
+
+need to extract low concentration samples... can find them in `qcdeltas` (since standards are subject to same pipetting errors as other samples, they are lumped into the same qc process). standard 7 is being used as the low concentration sample.
+
+```{r lcs}
+# do EHNA stds first:
+lcs <- filter(qcdeltas, grepl("Std7$", sample_id))  # some samples had EHNA added to the standards... these samples are excluded
+lcsd <- lcs %>%
+  group_by(plate) %>%
+  summarize(lcsd = sd(dabs, na.rm = TRUE))
+```
+
+combine blanks and lcs to calculate lod:
+
+```{r lod}
+lod <- merge(lob, lcsd) %>% 
+  mutate(lod_dabs = lob + 1.645*lcsd,
+         lod_labs = log(lod_dabs)) %>%
+  select(-c("lob", "lcsd"))
+lod
+```
+
+merge lod into qcdeltas and flag samples where labs < lod:
+
+```{r lod_qc}
+qcdeltas_lod <- merge(qcdeltas, lod, by = "plate")
+
+index <- qcdeltas_lod %>%
+  transmute(below = ifelse(labs < lod_labs, TRUE, FALSE)) %>%
+  unlist() %>%
+  as.logical() %>%
+  which()
+qcdeltas_lod$flag[index] <- "< LOD"
+
+# store wells below lod in data frame
+below_lod <- filter(qcdeltas_lod, flag == "< LOD")
+# display total number below lod per plate
+below_lod %>% group_by(plate) %>% summarize(n = n())
+```
+
+now samples can be fed into the standard curve
+
+display session info
+
+```{r session_info}
+sessionInfo()
+```
