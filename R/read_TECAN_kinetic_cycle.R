@@ -24,8 +24,9 @@ read_TECAN_kinetic_cycle <- function(path) {
     map_df(as.double) %>% 
     t() %>%
     as.ts()
+  colnames(abs) <- loc
   
   # return list of time, temp, location, and absorbance
   #TODO: make this into an object class for the other functions in this package
-  list(time = time, temp = temp, location = loc, absorbance = abs)
+  list(time = time, temp = temp, absorbance = abs)
 }
