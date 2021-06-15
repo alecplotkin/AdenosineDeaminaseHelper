@@ -1,11 +1,8 @@
-sc_model <- function(data, actual, expected, transform = identity) {
+sc_model <- function(data, measurement, expected, transform = identity) {
   if (!is.data.frame(data))
     stop("`data` must be a data.frame")
-  Y <- data[[actual]]
-  X <- data[[expected]]
-  if (!is.null(transform)) {
-    Y <- transform(Y)
-    X <- transform(X)
-  }
-  lm(Y ~ X)
+  f <- formula(sprintf("%1s ~ %2s", measurement, expected))
+  data[measurement] <- transform(data[measurement])
+  data[expected] <- transform(data[expected])
+  lm(f, data)
 }
